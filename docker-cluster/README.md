@@ -29,7 +29,7 @@ sinfo
 ## Notes
 
 - The containers run **privileged** so `slurmd` can manage a writable cgroup filesystem (Arch's SLURM is built against cgroup v2 + systemd, which doesn't exist inside a container).
-- The **root password** on every node is `paanduv` (sandbox only — set in `entrypoint.sh`).
+- The **root password** on every node is `hpc123` (sandbox only — set in `entrypoint.sh`).
 - The `config/munge/munge.key` secret is **never committed** (see `.gitignore`).
 - Job scripts and outputs go in `shared/job_scripts/` — visible on all nodes.
 - To stop everything: `docker compose down`

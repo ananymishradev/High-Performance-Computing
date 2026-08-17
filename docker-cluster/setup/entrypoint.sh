@@ -7,7 +7,7 @@ set -e
 echo "=== ${HOSTNAME} starting (role: ${NODE_ROLE:-worker}) ==="
 
 # Sandbox convenience: fixed root password so ssh-copy-id / SSH login works.
-echo 'root:paanduv' | chpasswd
+echo 'root:hpc123' | chpasswd
 
 # --- Shared Munge key (all nodes share ./config/munge via the bind mount) ---
 mkdir -p /etc/munge

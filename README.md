@@ -1,4 +1,4 @@
-# Paanduv HPC — SLURM Cluster Setup Guides
+# High Performance Computing — SLURM Cluster Setup Guides
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![SLURM](https://img.shields.io/badge/SLURM-26.x-blue.svg)](https://slurm.schedmd.com)
@@ -79,4 +79,4 @@ Found a bug in a guide, or a cleaner way to do something? Open an issue or a pul
 
 ## License
 
-[MIT](LICENSE) © Paanduv HPC Contributors
+[MIT](LICENSE) © High Performance Computing Contributors
