@@ -1,0 +1,7 @@
+# Never commit the shared Munge secret key
+config/munge/munge.key
+
+# Job output and runtime artifacts
+shared/job_scripts/output_*.out
+shared/job_scripts/error_*.out
+shared/job_scripts/result_*.out

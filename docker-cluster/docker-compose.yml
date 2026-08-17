@@ -1,0 +1,55 @@
+services:
+  # HOST NODE (also acts as controller)
+  master:
+    build: .
+    image: slurm-arch:latest
+    hostname: master
+    container_name: slurm_master
+    environment:
+      - NODE_ROLE=master
+    networks:
+      slurm_net:
+        ipv4_address: 10.0.0.2
+    volumes:
+      - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/munge:/etc/munge
+      - ./shared:/shared
+
+  # WORKER NODE 1
+  worker1:
+    build: .
+    image: slurm-arch:latest
+    hostname: worker1
+    container_name: slurm_worker1
+    environment:
+      - NODE_ROLE=worker
+    networks:
+      slurm_net:
+        ipv4_address: 10.0.0.3
+    volumes:
+      - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/munge:/etc/munge
+      - ./shared:/shared
+
+  # WORKER NODE 2
+  worker2:
+    build: .
+    image: slurm-arch:latest
+    hostname: worker2
+    container_name: slurm_worker2
+    environment:
+      - NODE_ROLE=worker
+    networks:
+      slurm_net:
+        ipv4_address: 10.0.0.4
+    volumes:
+      - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/munge:/etc/munge
+      - ./shared:/shared
+
+networks:
+  slurm_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
