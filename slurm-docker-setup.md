@@ -488,6 +488,9 @@ set -e
 # ${HOSTNAME} is a bash built-in — the hostname binary needs inetutils.
 echo "=== ${HOSTNAME} starting (role: ${NODE_ROLE:-worker}) ==="
 
+# Sandbox convenience: fixed root password so ssh-copy-id / SSH login works.
+echo 'root:paanduv' | chpasswd
+
 # --- Shared Munge key (all nodes share ./config/munge via the bind mount) ---
 mkdir -p /etc/munge
 if [ "$NODE_ROLE" = "master" ] && [ ! -f /etc/munge/munge.key ]; then
@@ -648,6 +651,8 @@ ps aux | grep -E 'slurmctld|slurmd'
 
 SLURM itself talks to nodes over its own protocol (port 6817), but setting up passwordless SSH is still useful to poke around the workers. Inside the master container:
 
+> **The root password on every node is `paanduv`** (set by the entrypoint). This is a sandbox — do not reuse this anywhere real.
+
 ```bash
 # Generate an SSH key (press Enter for all prompts)
 ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
@@ -655,10 +660,10 @@ ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
 # Copy the public key to authorized_keys on yourself
 cp /root/.ssh/id_rsa.pub /root/.ssh/authorized_keys
 
-# Copy key to worker1 (press Enter when asked "Are you sure...")
+# Copy key to worker1 (type the password: paanduv)
 ssh-copy-id -o StrictHostKeyChecking=no root@worker1
 
-# Copy key to worker2
+# Copy key to worker2 (type the password: paanduv)
 ssh-copy-id -o StrictHostKeyChecking=no root@worker2
 ```
 

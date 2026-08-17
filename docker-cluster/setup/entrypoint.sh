@@ -6,6 +6,9 @@ set -e
 # ${HOSTNAME} is a bash built-in — the hostname binary needs inetutils.
 echo "=== ${HOSTNAME} starting (role: ${NODE_ROLE:-worker}) ==="
 
+# Sandbox convenience: fixed root password so ssh-copy-id / SSH login works.
+echo 'root:paanduv' | chpasswd
+
 # --- Shared Munge key (all nodes share ./config/munge via the bind mount) ---
 mkdir -p /etc/munge
 if [ "$NODE_ROLE" = "master" ] && [ ! -f /etc/munge/munge.key ]; then
