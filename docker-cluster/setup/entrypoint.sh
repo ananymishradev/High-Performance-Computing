@@ -3,7 +3,8 @@
 # No systemd is used inside the containers, so nothing heavy boots up.
 set -e
 
-echo "=== $(hostname) starting (role: ${NODE_ROLE:-worker}) ==="
+# ${HOSTNAME} is a bash built-in — the hostname binary needs inetutils.
+echo "=== ${HOSTNAME} starting (role: ${NODE_ROLE:-worker}) ==="
 
 # --- Shared Munge key (all nodes share ./config/munge via the bind mount) ---
 mkdir -p /etc/munge
@@ -40,5 +41,5 @@ case "$NODE_ROLE" in
     ;;
 esac
 
-echo "=== $(hostname) is ready ==="
+echo "=== ${HOSTNAME} is ready ==="
 exec tail -f /dev/null

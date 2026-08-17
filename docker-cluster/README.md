@@ -23,10 +23,12 @@ sinfo
 | `Dockerfile` | Builds the pure-Arch image (SLURM + Munge + SSH via pacman) |
 | `docker-compose.yml` | Defines master / worker1 / worker2 + shared volumes |
 | `config/slurm.conf` | SLURM cluster config, mounted on all 3 nodes |
+| `config/cgroup.conf` | Tells the cgroup plugin to work without systemd |
 | `setup/entrypoint.sh` | Starts munged / sshd / slurmctld / slurmd (no systemd) |
 
 ## Notes
 
+- The containers run **privileged** so `slurmd` can manage a writable cgroup filesystem (Arch's SLURM is built against cgroup v2 + systemd, which doesn't exist inside a container).
 - The `config/munge/munge.key` secret is **never committed** (see `.gitignore`).
 - Job scripts and outputs go in `shared/job_scripts/` — visible on all nodes.
 - To stop everything: `docker compose down`

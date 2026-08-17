@@ -11,15 +11,16 @@ RUN pacman -Syu --noconfirm \
     iputils \
     iproute2 \
     net-tools \
+    inetutils \
     && rm -rf /var/cache/pacman/pkg
 
-# Arch normally creates the slurm + munge users via systemd-sysusers,
-# but systemd does not run inside a Docker container, so we create them
-# manually. slurm uses the same UID/GID (64030) as a real Arch install.
-RUN groupadd -r -g 64030 slurm \
-    && useradd -r -u 64030 -g 64030 -d /var/lib/slurm-llnl -s /bin/nologin slurm \
-    && groupadd -r munge \
-    && useradd -r -g munge -d /var/log/munge -s /bin/nologin munge
+# The slurm-llnl and munge packages already create the slurm + munge
+# users/groups through pacman's sysusers hook, so only create them if the
+# packages did not. slurm uses the same UID/GID (64030) as a real Arch install.
+RUN id slurm >/dev/null 2>&1 || { groupadd -r -g 64030 slurm \
+    && useradd -r -u 64030 -g 64030 -d /var/lib/slurm-llnl -s /bin/nologin slurm; } \
+    && id munge >/dev/null 2>&1 || { groupadd -r munge \
+    && useradd -r -g munge -d /var/log/munge -s /bin/nologin munge; }
 
 # Munge runtime + lib directories, owned by the munge user
 RUN mkdir -p /run/munge /var/lib/munge \

@@ -254,15 +254,16 @@ RUN pacman -Syu --noconfirm \
     iputils \
     iproute2 \
     net-tools \
+    inetutils \
     && rm -rf /var/cache/pacman/pkg
 
-# Arch normally creates the slurm + munge users via systemd-sysusers,
-# but systemd does not run inside a Docker container, so we create them
-# manually. slurm uses the same UID/GID (64030) as a real Arch install.
-RUN groupadd -r -g 64030 slurm \
-    && useradd -r -u 64030 -g 64030 -d /var/lib/slurm-llnl -s /bin/nologin slurm \
-    && groupadd -r munge \
-    && useradd -r -g munge -d /var/log/munge -s /bin/nologin munge
+# The slurm-llnl and munge packages already create the slurm + munge
+# users/groups through pacman's sysusers hook, so only create them if the
+# packages did not. slurm uses the same UID/GID (64030) as a real Arch install.
+RUN id slurm >/dev/null 2>&1 || { groupadd -r -g 64030 slurm \
+    && useradd -r -u 64030 -g 64030 -d /var/lib/slurm-llnl -s /bin/nologin slurm; } \
+    && id munge >/dev/null 2>&1 || { groupadd -r munge \
+    && useradd -r -g munge -d /var/log/munge -s /bin/nologin munge; }
 
 # Munge runtime + lib directories, owned by the munge user
 RUN mkdir -p /run/munge /var/lib/munge \
@@ -285,6 +286,10 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 Save and exit (Ctrl+O, Enter, Ctrl+X in nano).
 
+> **Why the `id ... || {...}` guard?** On Arch, installing `slurm-llnl` already creates the `slurm` and `munge` users via pacman's `sysusers` hook. A plain `groupadd slurm` then fails with `groupadd: group 'slurm' already exists` and the build stops. Guarding each command with `id ... >/dev/null 2>&1 ||` makes the build idempotent: create the users only if the packages did not.
+>
+> **Why `inetutils`?** `hostname` is not in the base image (Arch splits it into `inetutils`). We need it for the job test scripts and SSH checks.
+
 > **Why no systemd?** `systemd` cannot start services in the official Arch Docker image without extra privileges, and booting it 3 times would burn CPU/RAM for nothing. Instead, the entrypoint script starts exactly the 3-4 daemons we need. Result: a much lighter cluster that responds faster on your i5.
 
 ### File 2: `docker-compose.yml` (Defines the 3-node cluster)
@@ -306,6 +311,7 @@ services:
     image: slurm-arch:latest
     hostname: master
     container_name: slurm_master
+    privileged: true
     environment:
       - NODE_ROLE=master
     networks:
@@ -313,6 +319,7 @@ services:
         ipv4_address: 10.0.0.2
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
@@ -322,6 +329,7 @@ services:
     image: slurm-arch:latest
     hostname: worker1
     container_name: slurm_worker1
+    privileged: true
     environment:
       - NODE_ROLE=worker
     networks:
@@ -329,6 +337,7 @@ services:
         ipv4_address: 10.0.0.3
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
@@ -338,6 +347,7 @@ services:
     image: slurm-arch:latest
     hostname: worker2
     container_name: slurm_worker2
+    privileged: true
     environment:
       - NODE_ROLE=worker
     networks:
@@ -345,6 +355,7 @@ services:
         ipv4_address: 10.0.0.4
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
@@ -360,8 +371,11 @@ Save and exit.
 
 > **What is a bridge network?** A bridge network is like a private WiFi network that only your containers can see. They can talk to each other but are isolated from the outside world.
 
+> **Why `privileged: true`?** Arch's `slurm-llnl` package is compiled with cgroup v2 + systemd support. `slurmd` refuses to start unless it can manage a cgroup tree, which inside a default container is mounted read-only. Running the containers **privileged** gives them a writable `/sys/fs/cgroup`. Without it, `slurmd` exits with `fatal: systemd scope for slurmstepd could not be set` (see Troubleshooting). This is a sandbox, so privilege escalation here is fine — don't run privileged containers on untrusted workloads.
+
 > **What do the volumes do?**
 > - `./config/slurm.conf` is mounted into **all** nodes at `/etc/slurm-llnl/slurm.conf` (the Arch path — note it is `slurm-llnl`, not `slurm`). One file, automatically shared.
+> - `./config/cgroup.conf` is mounted into **all** nodes at `/etc/slurm-llnl/cgroup.conf`. It tells SLURM's cgroup plugin how to work without systemd (see File 4).
 > - `./config/munge` is mounted at `/etc/munge` on **all** nodes, so every node uses the **same** Munge key. No manual key copying needed.
 > - `./shared` is mounted at `/shared` on all nodes, so job scripts and output files are visible everywhere.
 
@@ -381,8 +395,10 @@ Paste this content:
 ```bash
 #=== SLURM Cluster Configuration (Arch Linux) ===
 
+# Modern SLURM builds (26.x) require a cluster name
+ClusterName=paanduv
+
 # Controller node (host)
-ControlMachine=master
 SlurmctldHost=master
 
 # Authentication
@@ -393,7 +409,8 @@ CredType=cred/munge
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
 
-# Docker containers have no cgroup access, so track processes the simple way
+# Track processes the simple way; cgroup.conf (File 4) handles the cgroup
+# plugin for us so it does not need systemd.
 ProctrackType=proctrack/linuxproc
 TaskPlugin=task/none
 
@@ -406,26 +423,52 @@ StateSaveLocation=/var/spool/slurm
 # Node name, address, CPUs, real memory (in MB)
 
 # --- Host/Controller Node ---
-NodeName=master CPUs=4 RealMemory=4000 State=IDLE
+NodeName=master CPUs=2 RealMemory=4000 State=IDLE
 
 # --- Worker Node 1 ---
-NodeName=worker1 CPUs=4 RealMemory=4000 State=IDLE
+NodeName=worker1 CPUs=2 RealMemory=4000 State=IDLE
 
 # --- Worker Node 2 ---
-NodeName=worker2 CPUs=4 RealMemory=4000 State=IDLE
+NodeName=worker2 CPUs=2 RealMemory=4000 State=IDLE
 
 # --- PARTITION (like a queue) ---
+# NOTE: SLURM config has NO line continuation. Keep each directive on ONE line,
+# or the split-off tokens (e.g. "State=UP") are parsed as unknown directives.
 PartitionName=normal Nodes=worker1,worker2 Default=YES MaxTime=INFINITE State=UP
 PartitionName=all Nodes=master,worker1,worker2 Default=NO MaxTime=INFINITE State=UP
 ```
 
 Save and exit.
 
-> **Note:** We allocated 4 CPUs and 4GB RAM per node. Your i5-13450HX has 12+4 cores, so distributing evenly across 3 nodes is reasonable.
+> **Note:** We allocate 2 CPUs and 4 GB RAM per node. Your i5-13450HX has 12+4 cores, so bump the `CPUs=` numbers if you want the scheduler to hand out more.
 >
 > **Note:** On Arch the config file lives in `/etc/slurm-llnl/`. That is where SLURM looks by default on this distro.
 
-### File 4: `setup/entrypoint.sh` (Starts the daemons inside each container)
+### File 4: `config/cgroup.conf` (Keeps slurmd alive without systemd)
+
+Arch's `slurm-llnl` package is compiled against cgroup v2 + systemd. When `slurmd` starts it tries to create a systemd "scope" over D-Bus for `slurmstepd`. Inside a container there is no systemd and no `/run/dbus/system_bus_socket`, so it dies with `fatal: systemd scope for slurmstepd could not be set`. This file tells the cgroup plugin to prepare the cgroup tree itself instead of asking systemd.
+
+Create the file:
+```bash
+nano ~/slurm-cluster/config/cgroup.conf
+```
+
+Paste this content:
+
+```bash
+# Arch's SLURM wants to ask systemd (via D-Bus) to create a cgroup scope for
+# slurmstepd. There is no systemd inside a container, so have the cgroup
+# plugin create the directories manually instead. Requires a writable cgroup
+# filesystem, which is why the containers run with privileged: true.
+CgroupPlugin=cgroup/v2
+IgnoreSystemd=yes
+```
+
+Save and exit.
+
+> **What does `IgnoreSystemd=yes` do?** It skips the D-Bus call to systemd and does a plain `mkdir` for the slurmstepd cgroup directories. Combined with `privileged: true` (writable `/sys/fs/cgroup`), `slurmd` starts normally inside the container.
+
+### File 5: `setup/entrypoint.sh` (Starts the daemons inside each container)
 
 Because there is no `systemd` inside the containers, this small script starts the daemons directly. It runs automatically every time a container starts.
 
@@ -442,7 +485,8 @@ Paste this content:
 # No systemd is used inside the containers, so nothing heavy boots up.
 set -e
 
-echo "=== $(hostname) starting (role: ${NODE_ROLE:-worker}) ==="
+# ${HOSTNAME} is a bash built-in — the hostname binary needs inetutils.
+echo "=== ${HOSTNAME} starting (role: ${NODE_ROLE:-worker}) ==="
 
 # --- Shared Munge key (all nodes share ./config/munge via the bind mount) ---
 mkdir -p /etc/munge
@@ -479,7 +523,7 @@ case "$NODE_ROLE" in
     ;;
 esac
 
-echo "=== $(hostname) is ready ==="
+echo "=== ${HOSTNAME} is ready ==="
 exec tail -f /dev/null
 ```
 
@@ -538,6 +582,8 @@ docker compose up -d
 ```
 
 The `-d` means "detached" — containers run in the background (like a background app).
+
+> **Note:** All three containers run **privileged** (see the `docker-compose.yml` explanation). This is required so `slurmd` can manage a writable cgroup filesystem. It only matters inside this sandbox cluster.
 
 > **Official Docker Compose Up Documentation:** https://docs.docker.com/reference/cli/docker/compose/up/
 
@@ -836,9 +882,33 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
+### Problem: `slurmd` dies with `fatal: systemd scope for slurmstepd could not be set`
+
+**Fix:** Arch's SLURM is built with cgroup v2 + systemd-dbus support, but there is no systemd inside the containers. Check the slurmd log:
+
+```bash
+docker exec slurm_worker1 tail -20 /var/log/slurm-llnl/slurmd.log
+# Expect: error: cgroup_dbus_attach_to_scope: cannot connect to dbus system daemon
+#         fatal: systemd scope for slurmstepd could not be set.
+```
+
+Two things must be true:
+1. `config/cgroup.conf` exists and is mounted (it sets `IgnoreSystemd=yes` so the cgroup plugin uses `mkdir` instead of D-Bus).
+2. The containers run with `privileged: true` so `/sys/fs/cgroup` is writable. Without it you get a different error: `unable to create cgroup '/sys/fs/cgroup/system' : Read-only file system`.
+
+```bash
+docker compose down
+# Make sure cgroup.conf + privileged: true are in place, then:
+docker compose up -d
+```
+
+### Problem: `slurmd` dies with `The cgroup mountpoint does not align with the current namespace`
+
+**Fix:** This happens when the host cgroup tree is bind-mounted into a container that still uses its own private cgroup namespace. Remove any `- /sys/fs/cgroup:/sys/fs/cgroup:rw` volume and rely on `privileged: true` instead, which mounts a writable cgroup inside the container's own namespace.
+
 ### Problem: Job fails with a `cgroup` error
 
-**Fix:** Make sure `slurm.conf` contains the two lines that avoid cgroups inside Docker:
+**Fix:** Make sure `slurm.conf` contains the two lines that avoid cgroup process tracking inside Docker, and that `cgroup.conf` is in place:
 
 ```bash
 ProctrackType=proctrack/linuxproc
@@ -846,6 +916,10 @@ TaskPlugin=task/none
 ```
 
 Then restart the cluster (see "Container fails to start" above).
+
+### Problem: `error: Parse error in file /etc/slurm-llnl/slurm.conf` or `unrecognized key: State`
+
+**Fix:** SLURM config files do **not** support line continuation. A directive split across two lines makes the second line's tokens parse as unknown directives (e.g. `State=UP` on its own line → `unrecognized key: State`). Put each directive on a single line. Also make sure `ClusterName=` is set — without it slurmctld refuses to start with `fatal: ClusterName needs to be specified`.
 
 ---
 
@@ -872,9 +946,10 @@ docker image prune -a     # Remove all unused Docker images
 ```
 ~/slurm-cluster/
 ├── Dockerfile                  # Recipe to build the pure-Arch container image
-├── docker-compose.yml          # Defines 3-node cluster architecture
+├── docker-compose.yml          # Defines 3-node cluster architecture (privileged)
 ├── config/
 │   ├── slurm.conf              # SLURM configuration (shared on all nodes)
+│   ├── cgroup.conf             # Tells the cgroup plugin to skip systemd
 │   └── munge/
 │       └── munge.key           # Shared secret key (identical on every node)
 ├── setup/

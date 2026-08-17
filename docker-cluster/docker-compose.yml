@@ -5,6 +5,7 @@ services:
     image: slurm-arch:latest
     hostname: master
     container_name: slurm_master
+    privileged: true
     environment:
       - NODE_ROLE=master
     networks:
@@ -12,6 +13,7 @@ services:
         ipv4_address: 10.0.0.2
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
@@ -21,6 +23,7 @@ services:
     image: slurm-arch:latest
     hostname: worker1
     container_name: slurm_worker1
+    privileged: true
     environment:
       - NODE_ROLE=worker
     networks:
@@ -28,6 +31,7 @@ services:
         ipv4_address: 10.0.0.3
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
@@ -37,6 +41,7 @@ services:
     image: slurm-arch:latest
     hostname: worker2
     container_name: slurm_worker2
+    privileged: true
     environment:
       - NODE_ROLE=worker
     networks:
@@ -44,6 +49,7 @@ services:
         ipv4_address: 10.0.0.4
     volumes:
       - ./config/slurm.conf:/etc/slurm-llnl/slurm.conf:ro
+      - ./config/cgroup.conf:/etc/slurm-llnl/cgroup.conf:ro
       - ./config/munge:/etc/munge
       - ./shared:/shared
 
