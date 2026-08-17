@@ -4,9 +4,9 @@
 [![SLURM](https://img.shields.io/badge/SLURM-26.x-blue.svg)](https://slurm.schedmd.com)
 [![Platform](https://img.shields.io/badge/platform-Linux-important.svg)](https://www.linux.org)
 
-Beginner-friendly, step-by-step guides for building your own **SLURM** (Simple Linux Utility for Resource Management) cluster — from a single laptop to a full multi-machine cluster over a shared Ethernet LAN.
+Step-by-step guides for building your own **SLURM** (Simple Linux Utility for Resource Management) cluster — from a single laptop to a full multi-machine cluster over a shared Ethernet LAN.
 
-Both guides share the same concepts (SLURM, Munge, SSH) and the same commands, so you can learn in a Docker sandbox first and then apply it to real hardware.
+Both guides share the same concepts (SLURM, Munge, SSH) and the same commands, so the Docker sandbox can be used to validate the approach before applying it to real hardware.
 
 ## What's Inside
 
@@ -75,7 +75,7 @@ Follow **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)**.
 
 ## Contributing
 
-Found a bug in a guide, or a cleaner way to do something? Open an issue or a pull request. Keep changes beginner-friendly and test anything you add.
+Found a bug in a guide, or a cleaner way to do something? Open an issue or a pull request. Keep documentation accurate, reproducible, and test anything you add.
 
 ## License
 

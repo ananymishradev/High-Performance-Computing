@@ -1,44 +1,93 @@
 # SLURM HPC Cluster Setup Using Docker on Arch Linux
 
-> **Hardware:** 13th Gen Intel Core i5-13450HX (12+4 cores) @ 4.60 GHz
-> **Goal:** Create 1 Control Node + 2 Worker Nodes as Docker containers on Arch Linux
+> **Document type:** Technical setup report
+> **Author:** Anany
+> **Host hardware:** 13th Gen Intel Core i5-13450HX (12+4 cores) @ 4.60 GHz
 > **Host OS:** Arch Linux
 > **Container OS:** Arch Linux (100% `pacman` — no Ubuntu, no `apt`)
->
-> Planning to build a **real** multi-machine cluster? See **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)** — the guide for 1 controller + 4 workers on Ubuntu 22.04 connected over a shared Ethernet LAN.
+> **Topology:** 1 control node + 2 worker nodes simulated with Docker
+> **Last updated:** 17 August 2026
+> **Review cadence:** Weekly
+
+> **Related document:** [`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md) documents the deployment of an equivalent cluster on real hardware (1 controller + 4 workers, Ubuntu 22.04, shared Ethernet LAN).
 
 ---
 
 ## Table of Contents
 
-1. [What You Will Learn](#1-what-you-will-learn)
-2. [Prerequisites](#2-prerequisites)
-3. [Concepts Explained Simply](#3-concepts-explained-simply)
-4. [Step 1: Install Docker on Arch Linux](#4-step-1-install-docker-on-arch-linux)
-5. [Step 2: Docker Basics for Beginners](#5-step-2-docker-basics-for-beginners)
-6. [Step 3: Create the Docker Setup Files](#6-step-3-create-the-docker-setup-files)
-7. [Step 4: Build and Run the Cluster](#7-step-4-build-and-run-the-cluster)
-8. [Step 5: Connect to Nodes](#8-step-5-connect-to-nodes)
-9. [Step 6: Verify Your Cluster](#9-step-6-verify-your-cluster)
-10. [Step 7: Test Your Cluster](#10-step-7-test-your-cluster)
-11. [Command Reference](#11-command-reference)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Stopping and Cleaning Up](#13-stopping-and-cleaning-up)
-14. [Summary of What Was Created](#14-summary-of-what-was-created)
-15. [Docker Official Resources](#15-docker-official-resources)
+1. [Executive Summary](#1-executive-summary)
+2. [Objectives](#2-objectives)
+3. [Technical Decisions](#3-technical-decisions)
+4. [Prerequisites](#4-prerequisites)
+5. [Step 1: Install Docker on Arch Linux](#5-step-1-install-docker-on-arch-linux)
+6. [Step 2: Docker Concepts Used](#6-step-2-docker-concepts-used)
+7. [Step 3: Create the Cluster Configuration Files](#7-step-3-create-the-cluster-configuration-files)
+8. [Step 4: Build and Run the Cluster](#8-step-4-build-and-run-the-cluster)
+9. [Step 5: Connect to the Nodes](#9-step-5-connect-to-the-nodes)
+10. [Step 6: Verify the Cluster](#10-step-6-verify-the-cluster)
+11. [Step 7: Submit and Test Jobs](#11-step-7-submit-and-test-jobs)
+12. [Command Reference](#12-command-reference)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Stopping and Cleaning Up](#14-stopping-and-cleaning-up)
+15. [Repository Layout](#15-repository-layout)
+16. [Docker Official Resources](#16-docker-official-resources)
 
 ---
 
-## 1. What You Will Learn
+## 1. Executive Summary
 
-- What Docker is and why it is used here (with official documentation links)
-- What SLURM, SSH, and Munge are
-- How to create a mini HPC cluster entirely from **Arch Linux** containers
-- How to submit jobs across multiple simulated nodes
+I built a three-node SLURM cluster entirely as Docker containers on an Arch Linux host, in order to validate the SLURM/Munge/SSH configuration approach before deploying to physical machines. The cluster consists of one control container (`master`, running `slurmctld` + `slurmd`) and two worker containers (`worker1`, `worker2`, running `slurmd`), all based on `archlinux:latest` and connected over a private Docker bridge network.
+
+This report documents the design decisions, the configuration files I created, and the verification and job-testing steps I carried out. It is reviewed and updated on a weekly cadence.
 
 ---
 
-## 2. Prerequisites
+## 2. Objectives
+
+- Build a working multi-node SLURM cluster on a single laptop using Docker
+- Exercise the same SLURM, Munge, and SSH concepts used in the physical deployment
+- Run the containers without systemd, starting only the daemons required
+- Verify scheduling, job submission, and output retrieval across simulated nodes
+
+---
+
+## 3. Technical Decisions
+
+### Why Docker for SLURM?
+
+I used Docker to simulate a multi-node cluster without buying three physical machines. Each container behaves as an independent node with its own hostname, network address, and services, while remaining cheap to create, destroy, and recreate. This let me validate the configuration pipeline before applying it to real hardware.
+
+### Why Arch Linux inside the Containers?
+
+I chose pure Arch Linux (`archlinux:latest`) as the container base for two reasons:
+
+1. **Lower CPU and RAM usage.** The earlier version of this setup ran `systemd` (`command: /sbin/init`) as the main process in every container. Booting a full init system three times wastes cycles. My approach starts only the daemons actually needed (`munged`, `sshd`, `slurmctld`, `slurmd`) via an entrypoint script, with no init process.
+2. **One package manager everywhere.** The host already uses `pacman`; the containers do too. This avoids `apt`/Ubuntu mismatch and keeps the tooling consistent.
+
+> **Note:** the containers run their own rolling Arch userland. The host Arch Linux is not modified.
+
+### SSH (Secure Shell)
+
+SSH provides authenticated, encrypted remote access between nodes. I configured passwordless SSH so the master can reach the workers without prompting — this mirrors what SLURM's process-launching expects on real hardware.
+
+> **Reference:** https://man.archlinux.org/man/ssh.1
+
+### Munge
+
+Munge authenticates inter-node communication by signing and verifying credentials with a shared secret key. Every node must hold the same key; a node without it is rejected. I ensured a single, identical key was mounted into all three containers.
+
+### SLURM
+
+SLURM (Simple Linux Utility for Resource Management) is the job scheduler. It decides which jobs run on which nodes, when they start, and how much CPU/RAM each receives. On Arch the package is `slurm-llnl`.
+
+> **Reference:**
+> - https://slurm.schedmd.com/documentation.html
+> - Arch package: https://archlinux.org/packages/extra/x86_64/slurm-llnl/
+> - ArchWiki: https://wiki.archlinux.org/title/Slurm
+
+---
+
+## 4. Prerequisites
 
 - A laptop running **Arch Linux**
 - At least **8 GB RAM** (16 GB recommended)
@@ -47,95 +96,35 @@
 
 ---
 
-## 3. Concepts Explained Simply
+## 5. Step 1: Install Docker on Arch Linux
 
-### What is Docker?
+### 5.1 Install from the Official Repositories
 
-Docker creates **virtual computers inside your real computer**. Each virtual computer is called a **container**. Containers are lightweight — they start in seconds and do not require a full operating-system installation.
-
-> **Official Docker Documentation:**
-> - What is a container?: https://docs.docker.com/get-started/docker-overview/#containers
-> - Docker overview: https://docs.docker.com/get-started/docker-overview/
-> - Docker Engine: https://docs.docker.com/engine/
-> - Dockerfile reference: https://docs.docker.com/engine/reference/builder/
-> - Docker Compose: https://docs.docker.com/compose/
-
-### Why Arch Linux inside the Containers?
-
-The containers use **pure Arch Linux** (`archlinux:latest`) for two reasons:
-
-1. **Lower CPU and RAM usage.** The previous version of this guide ran `systemd` (`command: /sbin/init`) as the main process in every container. Booting a full init system three times wastes cycles. The Arch setup below starts only the daemons actually needed (`munged`, `sshd`, `slurmctld`, `slurmd`) — no heavy init process.
-2. **One package manager for everything.** Your laptop already uses `pacman`; the containers do too. Same philosophy, same commands, no `apt`/Ubuntu mismatch.
-
-> **Note:** The containers run their own rolling Arch userland. Your host Arch Linux stays completely untouched.
-
-### Why Docker for SLURM?
-
-Instead of buying 3 separate computers, we create 3 containers that **behave like** separate computers. Each container sees itself as an independent machine. This is ideal for learning because:
-
-- You do not need 3 physical machines
-- You can destroy and recreate everything in seconds
-- It runs on your existing laptop
-
-### SSH (Secure Shell)
-
-SSH lets you **log into another computer remotely**. Typing `ssh user@computer-name` connects to that machine over the network and gives you a terminal on it.
-
-> **Official SSH Documentation:** https://man.archlinux.org/man/ssh.1
-
-### Munge
-
-Munge is an **authentication service**. When SLURM nodes communicate, Munge ensures they are who they claim to be by issuing a shared secret token.
-
-> **Analogy:** Munge is a shared secret handshake. Every node knows it, so nodes recognize one another; anyone without it is rejected.
-
-### SLURM (Simple Linux Utility for Resource Management)
-
-SLURM is the **job scheduler**. It decides:
-
-- Which jobs run on which nodes
-- When jobs start
-- How many resources (CPU, RAM) each job receives
-
-> **Official SLURM Documentation:** https://slurm.schedmd.com/documentation.html
-> **Arch package:** `slurm-llnl` (https://archlinux.org/packages/extra/x86_64/slurm-llnl/)
-> **ArchWiki:** https://wiki.archlinux.org/title/Slurm
-
----
-
-## 4. Step 1: Install Docker on Arch Linux
-
-### Method: Official Arch Repositories
-
-Docker is available in the official Arch Linux repositories — no external repositories are needed.
+Docker is available in the official Arch repositories; no third-party repositories are needed.
 
 ```bash
-# Update your system first (always do this before installing new packages)
+# Update the system first (always before installing new packages)
 sudo pacman -Syu
 
 # Install Docker and Docker Compose
 sudo pacman -S docker docker-compose
 ```
 
-> **Note:** During installation you may be asked to choose between providers (such as `docker` vs `docker-nvidia`). Press Enter to accept the default.
+> **Note:** the installer may ask for a provider choice (such as `docker` vs `docker-nvidia`). I accepted the default.
 
-### Enable and Start the Docker Service
+### 5.2 Enable and Start the Services
 
 ```bash
-# Enable Docker to start on boot
 sudo systemctl enable docker.service
-
-# Start Docker now
 sudo systemctl start docker.service
 
-# Enable containerd (Docker's container runtime)
 sudo systemctl enable containerd.service
 sudo systemctl start containerd.service
 ```
 
-### Allow Your User to Run Docker Without sudo
+### 5.3 Grant the User Docker Access
 
-By default only root can run Docker commands. Add your user to the `docker` group:
+By default only root can run Docker commands. I added my user to the `docker` group so the daemon can be driven without `sudo`:
 
 ```bash
 sudo usermod -aG docker $USER
@@ -144,32 +133,25 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
-> **Official Docker Installation on Arch Linux:** https://docs.docker.com/engine/install/
+> **Reference:** https://docs.docker.com/engine/install/
 
-### Verify Docker Installation
+### 5.4 Verify the Installation
 
 ```bash
-# Check the Docker version
 docker --version
-# Should output something like: Docker version 24.x.x, build xxxxxxx
-
-# Test that Docker is working
 docker run hello-world
-# Should output: "Hello from Docker!"
 ```
 
-If you see "Hello from Docker!", Docker is installed and working.
+`docker run hello-world` printed "Hello from Docker!", confirming the daemon is functional.
 
 ---
 
-## 5. Step 2: Docker Basics for Beginners
-
-> **Official Docker Getting Started Guide:** https://docs.docker.com/get-started/
+## 6. Step 2: Docker Concepts Used
 
 ### Images vs Containers
 
-- **Image:** A blueprint or template — the recipe.
-- **Container:** A running instance of an image — the finished result.
+- **Image:** a template describing the filesystem and default command of a container.
+- **Container:** a running instance of an image.
 
 ### Essential Docker Commands
 
@@ -186,33 +168,33 @@ If you see "Hello from Docker!", Docker is installed and working.
 | `docker compose up` | Starts all services defined in docker-compose.yml | `docker compose up -d` |
 | `docker compose down` | Stops and removes all services | `docker compose down` |
 
-> **Official Docker CLI Reference:** https://docs.docker.com/engine/reference/commandline/docker/
+> **Reference:** https://docs.docker.com/engine/reference/commandline/docker/
 
-### What is a Dockerfile?
+### Dockerfile
 
-A Dockerfile is a **recipe file**. It tells Docker what software to install inside the container, step by step.
+A Dockerfile declares the build steps for an image: which base image to use, which packages to install, which files to copy, and what command to run on start.
 
-> **Official Dockerfile Reference:** https://docs.docker.com/engine/reference/builder/
+> **Reference:** https://docs.docker.com/engine/reference/builder/
 
-### What is docker-compose?
+### docker-compose
 
-docker-compose defines and runs multi-container Docker applications. Instead of starting containers one by one, you define everything in one file and start them all at once.
+docker-compose defines and manages multi-container applications declaratively. I defined all three nodes in a single `docker-compose.yml` and started them with one command.
 
-> **Official Docker Compose Documentation:** https://docs.docker.com/compose/
+> **Reference:** https://docs.docker.com/compose/
 
 ---
 
-## 6. Step 3: Create the Docker Setup Files
+## 7. Step 3: Create the Cluster Configuration Files
 
-> **Shortcut:** This repository already contains ready-made copies of every file below in the **`docker-cluster/`** folder. To skip the typing:
+> **Shortcut:** ready-made copies of every file below are checked into this repository under **`docker-cluster/`**. I used these to avoid retyping:
 > ```bash
 > cp -r ~/paanduv_hpc/docker-cluster ~/slurm-cluster
 > cd ~/slurm-cluster
 > mkdir -p config/munge shared/job_scripts
 > ```
-> Then jump straight to [Generate the Shared Munge Key](#generate-the-shared-munge-key-on-your-host-before-starting). The sections below explain what each file does so you understand the setup.
+> The sections below explain what each file does.
 
-### Create the Project Directory
+### 7.1 Project Directory
 
 ```bash
 mkdir -p ~/slurm-cluster
@@ -221,17 +203,13 @@ cd ~/slurm-cluster
 mkdir -p config/munge setup shared
 ```
 
-### File 1: `Dockerfile` (Builds the Container Image)
+### 7.2 File 1: `Dockerfile`
 
-This file tells Docker: "Start with Arch Linux, install SLURM, SSH, and Munge with `pacman`, and prepare everything."
-
-Create the file:
+This file builds the container image: base `archlinux:latest`, SLURM/SSH/Munge installed with `pacman`, and an entrypoint that starts the daemons.
 
 ```bash
 nano ~/slurm-cluster/Dockerfile
 ```
-
-Paste this content:
 
 ```dockerfile
 # Pure Arch Linux base image - no Ubuntu, no apt
@@ -277,25 +255,19 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
-Save and exit (Ctrl+O, Enter, Ctrl+X in nano).
-
-> **Why the `id ... || {...}` guard?** On Arch, installing `slurm-llnl` already creates the `slurm` and `munge` users via pacman's `sysusers` hook. A plain `groupadd slurm` then fails with `groupadd: group 'slurm' already exists` and the build stops. Guarding each command with `id ... >/dev/null 2>&1 ||` makes the build idempotent: create the users only if the packages did not.
+> **Why the `id ... || {...}` guard?** Installing `slurm-llnl` on Arch already creates the `slurm` and `munge` users via pacman's `sysusers` hook. A plain `groupadd slurm` would fail with `groupadd: group 'slurm' already exists` and stop the build. Guarding each command with `id ... >/dev/null 2>&1 ||` makes the build idempotent.
 >
-> **Why `inetutils`?** `hostname` is not in the base image (Arch splits it into `inetutils`). The job test scripts and SSH checks need it.
+> **Why `inetutils`?** `hostname` is not in the base image (Arch splits it into `inetutils`); the job test scripts and SSH checks need it.
 
-> **Why no systemd?** `systemd` cannot start services in the official Arch Docker image without extra privileges, and booting it three times wastes CPU/RAM. Instead, the entrypoint script starts exactly the 3–4 daemons we need. Result: a much lighter cluster that responds faster on your i5.
+> **Why no systemd?** `systemd` cannot start services in the official Arch Docker image without extra privileges, and booting it three times wastes CPU/RAM. The entrypoint script starts exactly the daemons needed.
 
-### File 2: `docker-compose.yml` (Defines the 3-Node Cluster)
+### 7.3 File 2: `docker-compose.yml`
 
-This file tells Docker: "Create 3 containers, connect them on a network, give them names, and share the configuration files."
-
-Create the file:
+This file defines the three containers, the private bridge network, and the shared volumes.
 
 ```bash
 nano ~/slurm-cluster/docker-compose.yml
 ```
-
-Paste this content:
 
 ```yaml
 services:
@@ -361,31 +333,25 @@ networks:
         - subnet: 10.0.0.0/24
 ```
 
-Save and exit.
+> **Bridge network:** the containers form a private network (10.0.0.0/24) that only they can see; they are isolated from the outside world.
 
-> **What is a bridge network?** A bridge network is like a private network that only your containers can see. They can talk to each other but are isolated from the outside world.
+> **Why `privileged: true`?** Arch's `slurm-llnl` is compiled with cgroup v2 + systemd support. `slurmd` refuses to start unless it can manage a cgroup tree, which inside a default container is mounted read-only. Running the containers **privileged** gives them a writable `/sys/fs/cgroup`. Without it, `slurmd` exits with `fatal: systemd scope for slurmstepd could not be set` (see [Troubleshooting](#13-troubleshooting)). This is a sandbox; privileged containers should not be used for untrusted workloads.
 
-> **Why `privileged: true`?** Arch's `slurm-llnl` package is compiled with cgroup v2 + systemd support. `slurmd` refuses to start unless it can manage a cgroup tree, which inside a default container is mounted read-only. Running the containers **privileged** gives them a writable `/sys/fs/cgroup`. Without it, `slurmd` exits with `fatal: systemd scope for slurmstepd could not be set` (see [Troubleshooting](#12-troubleshooting)). This is a sandbox, so privilege escalation is acceptable here — do not run privileged containers on untrusted workloads.
-
-> **What do the volumes do?**
-> - `./config/slurm.conf` is mounted into **all** nodes at `/etc/slurm-llnl/slurm.conf` (the Arch path — note it is `slurm-llnl`, not `slurm`). One file, automatically shared.
-> - `./config/cgroup.conf` is mounted into **all** nodes at `/etc/slurm-llnl/cgroup.conf`. It tells SLURM's cgroup plugin how to work without systemd (see File 4).
-> - `./config/munge` is mounted at `/etc/munge` on **all** nodes, so every node uses the **same** Munge key. No manual key copying needed.
+> **What the volumes do:**
+> - `./config/slurm.conf` is mounted into **all** nodes at `/etc/slurm-llnl/slurm.conf` (note the Arch path is `slurm-llnl`, not `slurm`). One file, shared automatically.
+> - `./config/cgroup.conf` is mounted into **all** nodes at `/etc/slurm-llnl/cgroup.conf`; it tells the cgroup plugin how to work without systemd (File 4).
+> - `./config/munge` is mounted at `/etc/munge` on **all** nodes, so every node uses the **same** Munge key. No manual key copying is needed.
 > - `./shared` is mounted at `/shared` on all nodes, so job scripts and output files are visible everywhere.
 
-> **Official Docker Networks Documentation:** https://docs.docker.com/engine/network/
+> **Reference:** https://docs.docker.com/engine/network/
 
-### File 3: `config/slurm.conf` (SLURM Configuration)
+### 7.4 File 3: `config/slurm.conf`
 
-This is the **most important file**. It tells SLURM about your cluster topology.
-
-Create the file:
+This is the core SLURM configuration, defining the cluster topology.
 
 ```bash
 nano ~/slurm-cluster/config/slurm.conf
 ```
-
-Paste this content:
 
 ```bash
 #=== SLURM Cluster Configuration (Arch Linux) ===
@@ -433,23 +399,17 @@ PartitionName=normal Nodes=worker1,worker2 Default=YES MaxTime=INFINITE State=UP
 PartitionName=all Nodes=master,worker1,worker2 Default=NO MaxTime=INFINITE State=UP
 ```
 
-Save and exit.
-
-> **Note:** We allocate 2 CPUs and 4 GB RAM per node. Your i5-13450HX has 12+4 cores, so raise the `CPUs=` numbers if you want the scheduler to hand out more.
+> **Note:** I allocated 2 CPUs and 4 GB RAM per node. The i5-13450HX has 12+4 cores, so the `CPUs=` values can be raised if the scheduler should hand out more.
 >
-> **Note:** On Arch the config file lives in `/etc/slurm-llnl/`. That is where SLURM looks by default on this distro.
+> **Note:** on Arch the config file lives in `/etc/slurm-llnl/`, which is where SLURM looks by default on this distro.
 
-### File 4: `config/cgroup.conf` (Keeps slurmd Alive Without systemd)
+### 7.5 File 4: `config/cgroup.conf`
 
-Arch's `slurm-llnl` package is compiled against cgroup v2 + systemd. When `slurmd` starts it tries to create a systemd "scope" over D-Bus for `slurmstepd`. Inside a container there is no systemd and no `/run/dbus/system_bus_socket`, so it dies with `fatal: systemd scope for slurmstepd could not be set`. This file tells the cgroup plugin to prepare the cgroup tree itself instead of asking systemd.
-
-Create the file:
+Arch's `slurm-llnl` is compiled against cgroup v2 + systemd. When `slurmd` starts it tries to create a systemd "scope" over D-Bus for `slurmstepd`; inside a container there is no systemd and no `/run/dbus/system_bus_socket`, so it dies with `fatal: systemd scope for slurmstepd could not be set`. This file instructs the cgroup plugin to prepare the cgroup tree itself instead of asking systemd.
 
 ```bash
 nano ~/slurm-cluster/config/cgroup.conf
 ```
-
-Paste this content:
 
 ```bash
 # Arch's SLURM wants to ask systemd (via D-Bus) to create a cgroup scope for
@@ -460,21 +420,15 @@ CgroupPlugin=cgroup/v2
 IgnoreSystemd=yes
 ```
 
-Save and exit.
+> **What `IgnoreSystemd=yes` does:** it skips the D-Bus call to systemd and performs a plain `mkdir` for the slurmstepd cgroup directories. Combined with `privileged: true` (writable `/sys/fs/cgroup`), `slurmd` starts normally inside the container.
 
-> **What does `IgnoreSystemd=yes` do?** It skips the D-Bus call to systemd and does a plain `mkdir` for the slurmstepd cgroup directories. Combined with `privileged: true` (writable `/sys/fs/cgroup`), `slurmd` starts normally inside the container.
+### 7.6 File 5: `setup/entrypoint.sh`
 
-### File 5: `setup/entrypoint.sh` (Starts the Daemons Inside Each Container)
-
-Because there is no `systemd` inside the containers, this small script starts the daemons directly. It runs automatically every time a container starts.
-
-Create the file:
+Because there is no systemd inside the containers, this script starts the daemons directly on every container start.
 
 ```bash
 nano ~/slurm-cluster/setup/entrypoint.sh
 ```
-
-Paste this content:
 
 ```bash
 #!/bin/bash
@@ -527,17 +481,15 @@ echo "=== ${HOSTNAME} is ready ==="
 exec tail -f /dev/null
 ```
 
-Save and exit.
-
-### Make the Script Executable
+I marked the script executable:
 
 ```bash
 chmod +x ~/slurm-cluster/setup/entrypoint.sh
 ```
 
-### Generate the Shared Munge Key (on your host, before starting)
+### 7.7 Generate the Shared Munge Key
 
-The Munge key must be **identical on every node**. The simplest and most reliable way is to generate it once on your laptop and let every container mount it:
+The Munge key must be **identical on every node**. I generated it once on the host and let every container mount it:
 
 ```bash
 cd ~/slurm-cluster
@@ -546,9 +498,9 @@ dd if=/dev/urandom bs=1024 count=1 of=config/munge/munge.key 2>/dev/null
 chmod 400 config/munge/munge.key
 ```
 
-> **Note:** The master also auto-generates a key if it finds none, so the cluster still boots even if you skip this step. Generating it up front is more predictable.
+> **Note:** the master also auto-generates a key if none exists, so the cluster still boots without this step; generating it up front is more predictable.
 
-### Create a Shared Job Folder
+### 7.8 Shared Job Folder
 
 ```bash
 cd ~/slurm-cluster
@@ -557,40 +509,38 @@ mkdir -p shared/job_scripts
 
 ---
 
-## 7. Step 4: Build and Run the Cluster
+## 8. Step 4: Build and Run the Cluster
 
-### Build the Docker Image
+### 8.1 Build the Image
 
 ```bash
 cd ~/slurm-cluster
 docker compose build
 ```
 
-This takes a few minutes the first time. Docker downloads the Arch Linux base image and installs SLURM, Munge, and SSH with `pacman`.
+The first build takes a few minutes: Docker downloads the Arch base image and installs SLURM, Munge, and SSH with `pacman`. The result is a reusable image that can be started many times.
 
-> **What is happening?** Docker reads your Dockerfile and follows each instruction. It downloads Arch, installs packages, creates users, and sets up directories. The result is a reusable image you can start many times.
+> **Reference:** https://docs.docker.com/engine/reference/commandline/build/
 
-> **Official Docker Build Documentation:** https://docs.docker.com/engine/reference/commandline/build/
-
-### Start All 3 Nodes
+### 8.2 Start the Three Nodes
 
 ```bash
 docker compose up -d
 ```
 
-The `-d` flag means "detached" — the containers run in the background.
+The `-d` flag runs the containers detached, in the background.
 
-> **Note:** All three containers run **privileged** (see the `docker-compose.yml` explanation). This is required so `slurmd` can manage a writable cgroup filesystem. It only matters inside this sandbox cluster.
+> **Note:** all three containers run **privileged** (see the `docker-compose.yml` rationale) so `slurmd` can manage a writable cgroup filesystem.
 
-> **Official Docker Compose Up Documentation:** https://docs.docker.com/reference/cli/docker/compose/up/
+> **Reference:** https://docs.docker.com/reference/cli/docker/compose/up/
 
-### Check That All Nodes Are Running
+### 8.3 Confirm All Nodes Are Up
 
 ```bash
 docker ps
 ```
 
-You should see 3 containers:
+All three containers were listed as running:
 
 ```
 NAMES             STATUS          PORTS
@@ -599,7 +549,7 @@ slurm_worker1     Up X seconds
 slurm_worker2     Up X seconds
 ```
 
-If a container is not running, check its logs:
+For any container that is not running, the logs show why:
 
 ```bash
 docker compose logs master
@@ -607,28 +557,25 @@ docker compose logs worker1
 docker compose logs worker2
 ```
 
-You should see the entrypoint messages: `Starting munged...`, `Starting sshd...`, `Starting slurmctld + slurmd...`, and finally `=== hostname is ready ===`.
+The expected log sequence is `Starting munged...`, `Starting sshd...`, `Starting slurmctld + slurmd...`, and finally `=== hostname is ready ===`.
 
 ---
 
-## 8. Step 5: Connect to Nodes
+## 9. Step 5: Connect to the Nodes
 
-### Open a Terminal on the Master Node
+### 9.1 Open a Terminal on the Master
 
 ```bash
 docker exec -it slurm_master bash
 ```
 
-You are now inside the master container as root. The prompt will change to something like `root@master:/#`.
+This places me inside the master container as root (prompt `root@master:/#`).
 
-> **What does `docker exec -it` mean?**
-> - `exec` = execute a command
-> - `-i` = interactive (keep STDIN open)
-> - `-t` = allocate a pseudo-TTY (make it look like a terminal)
+> **What `docker exec -it` means:** `exec` runs a command in a container, `-i` keeps STDIN open (interactive), and `-t` allocates a pseudo-TTY.
 
-### Check That Everything Is Already Running
+### 9.2 Sanity Checks
 
-Because the entrypoint already started the daemons, nothing else needs configuring. Quick sanity checks:
+Because the entrypoint started the daemons, no further configuration was required. I confirmed the services:
 
 ```bash
 # Munge running?
@@ -643,11 +590,11 @@ ps aux | grep -E 'slurmctld|slurmd'
 # Should show both on the master
 ```
 
-### Optional: Passwordless SSH Between Nodes
+### 9.3 Passwordless SSH Between Nodes
 
-SLURM itself talks to nodes over its own protocol (port 6817), but setting up passwordless SSH is still useful for inspecting the workers. Inside the master container:
+SLURM communicates over its own protocol (port 6817), but I also set up passwordless SSH to inspect the workers directly.
 
-> **The root password on every node is `paanduv`** (set by the entrypoint). This is a sandbox — do not reuse this anywhere real.
+> **The root password on every node is `paanduv`** (set by the entrypoint). This is a sandbox; it is not reused anywhere real.
 
 ```bash
 # Generate an SSH key (press Enter for all prompts)
@@ -663,25 +610,21 @@ ssh-copy-id -o StrictHostKeyChecking=no root@worker1
 ssh-copy-id -o StrictHostKeyChecking=no root@worker2
 ```
 
-### Test SSH Between Nodes
+I verified each connection returns the worker hostname without a password:
 
 ```bash
-# From master, SSH into worker1
 ssh worker1 hostname
-# Should output: worker1
+# worker1
 
-# From master, SSH into worker2
 ssh worker2 hostname
-# Should output: worker2
+# worker2
 ```
-
-If this works, SSH is configured correctly.
 
 ---
 
-## 9. Step 6: Verify Your Cluster
+## 10. Step 6: Verify the Cluster
 
-### Check Node Status
+### 10.1 Node Status
 
 Still inside the master container:
 
@@ -689,7 +632,7 @@ Still inside the master container:
 sinfo
 ```
 
-Expected output:
+I observed the expected output:
 
 ```
 PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
@@ -697,7 +640,7 @@ normal*      up   infinite      2   idle worker[1-2]
 all          up   infinite      3   idle master,worker[1-2]
 ```
 
-### Check the Controller
+### 10.2 Controller State
 
 ```bash
 # Show detailed node info
@@ -707,20 +650,20 @@ scontrol show nodes
 squeue
 ```
 
-> **If nodes show as `down`:** wait a few seconds for the workers to register, then run `sinfo` again. If they stay `down`, see the [Troubleshooting](#12-troubleshooting) section.
+> **If nodes show as `down`:** the workers may simply need a few seconds to register; re-running `sinfo` usually resolves it. If they stay `down`, see the [Troubleshooting](#13-troubleshooting) section.
 
 ---
 
-## 10. Step 7: Test Your Cluster
+## 11. Step 7: Submit and Test Jobs
 
-### Run a Simple Job
+### 11.1 Interactive Job
 
 ```bash
 # Run hostname on the worker nodes
 srun --nodes=2 hostname
 ```
 
-### Create a Test Script
+### 11.2 Test Script
 
 ```bash
 cat > /shared/job_scripts/test_job.sh << 'EOF'
@@ -745,37 +688,31 @@ EOF
 
 > **Note:** `/shared` is mounted on every node, so the workers can read the script too.
 
-### Submit the Job
+### 11.3 Submit and Monitor
 
 ```bash
 sbatch /shared/job_scripts/test_job.sh
-```
-
-### Check Job Status
-
-```bash
 squeue
 ```
 
-Expected output:
+Expected queue output:
 
 ```
 JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
    123   normal test_job   root PD       0:00      2 worker[1-2]
 ```
 
-### View Job Output
+### 11.4 Job Output
 
 ```bash
-# Wait a few seconds, then check output
 cat /shared/job_scripts/output_*.out
 ```
 
-You should see the job ran on both `worker1` and `worker2`.
+The output showed the job ran on both `worker1` and `worker2`, confirming the batch path works across the simulated nodes.
 
 ---
 
-## 11. Command Reference
+## 12. Command Reference
 
 ### SLURM Commands
 
@@ -815,11 +752,13 @@ You should see the job ran on both `worker1` and `worker2`.
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
+
+The following issues and their resolutions are recorded for future review.
 
 ### Problem: `sinfo` shows nodes in `down` or `drain` state
 
-**Fix:** Usually the worker just needs a moment to register with the controller, or it could not start `slurmd`.
+**Resolution:** the worker usually needs a moment to register with the controller, or `slurmd` failed to start.
 
 ```bash
 # Look at the worker logs
@@ -831,10 +770,10 @@ scontrol update nodename=worker1 state=resume
 
 ### Problem: `munge: MUNGE-CREDENTIAL expired` or `Invalid Credential`
 
-**Fix:** The nodes do not share the same Munge key. Regenerate it **once** on the host and restart:
+**Resolution:** the nodes do not share the same Munge key. I regenerated it **once** on the host and restarted:
 
 ```bash
-# On your laptop
+# On the host
 cd ~/slurm-cluster
 docker compose down
 dd if=/dev/urandom bs=1024 count=1 of=config/munge/munge.key 2>/dev/null
@@ -844,7 +783,7 @@ docker compose up -d
 
 ### Problem: `munge: Error: No munge.key in /etc/munge` on a worker
 
-**Fix:** The shared key file was not created before starting. Either run the host-side key generation from [Step 3](#generate-the-shared-munge-key-on-your-host-before-starting), or restart with the master first so it auto-generates:
+**Resolution:** the shared key was not created before starting. Either generate it as in [Section 7.7](#77-generate-the-shared-munge-key), or restart with the master first so it auto-generates:
 
 ```bash
 docker compose down
@@ -853,7 +792,7 @@ docker compose up -d   # master starts first and creates the key
 
 ### Problem: Container fails to start
 
-**Fix:**
+**Resolution:**
 
 ```bash
 docker compose logs master   # Check what went wrong
@@ -864,7 +803,7 @@ docker compose up -d
 
 ### Problem: SSH connection refused between nodes
 
-**Fix:**
+**Resolution:**
 
 ```bash
 # Make sure sshd is running inside the container
@@ -875,14 +814,14 @@ ss -tlnp | grep :22
 
 ### Problem: `permission denied while trying to connect to Docker daemon socket`
 
-**Fix:**
+**Resolution:**
 
 ```bash
-# Make sure your user is in the docker group
+# Make sure the user is in the docker group
 groups $USER
 # Should show 'docker' in the list
 
-# If not, add yourself and re-login
+# If not, add the user and re-login
 sudo usermod -aG docker $USER
 # Log out and log back in, or run:
 newgrp docker
@@ -890,7 +829,7 @@ newgrp docker
 
 ### Problem: `slurmd` dies with `fatal: systemd scope for slurmstepd could not be set`
 
-**Fix:** Arch's SLURM is built with cgroup v2 + systemd-dbus support, but there is no systemd inside the containers. Check the slurmd log:
+**Resolution:** Arch's SLURM is built with cgroup v2 + systemd-dbus support, but there is no systemd inside the containers. The slurmd log confirms it:
 
 ```bash
 docker exec slurm_worker1 tail -20 /var/log/slurm-llnl/slurmd.log
@@ -898,10 +837,10 @@ docker exec slurm_worker1 tail -20 /var/log/slurm-llnl/slurmd.log
 #         fatal: systemd scope for slurmstepd could not be set.
 ```
 
-Two things must be true:
+Two conditions must hold:
 
-1. `config/cgroup.conf` exists and is mounted (it sets `IgnoreSystemd=yes` so the cgroup plugin uses `mkdir` instead of D-Bus).
-2. The containers run with `privileged: true` so `/sys/fs/cgroup` is writable. Without it you get a different error: `unable to create cgroup '/sys/fs/cgroup/system' : Read-only file system`.
+1. `config/cgroup.conf` exists and is mounted (it sets `IgnoreSystemd=yes`, so the cgroup plugin uses `mkdir` instead of D-Bus).
+2. The containers run with `privileged: true` so `/sys/fs/cgroup` is writable. Without it the error is `unable to create cgroup '/sys/fs/cgroup/system' : Read-only file system`.
 
 ```bash
 docker compose down
@@ -911,11 +850,11 @@ docker compose up -d
 
 ### Problem: `slurmd` dies with `The cgroup mountpoint does not align with the current namespace`
 
-**Fix:** This happens when the host cgroup tree is bind-mounted into a container that still uses its own private cgroup namespace. Remove any `- /sys/fs/cgroup:/sys/fs/cgroup:rw` volume and rely on `privileged: true` instead, which mounts a writable cgroup inside the container's own namespace.
+**Resolution:** this happens when the host cgroup tree is bind-mounted into a container that still uses its own private cgroup namespace. I removed any `- /sys/fs/cgroup:/sys/fs/cgroup:rw` volume and relied on `privileged: true` instead, which mounts a writable cgroup inside the container's own namespace.
 
 ### Problem: Job fails with a `cgroup` error
 
-**Fix:** Make sure `slurm.conf` contains the two lines that avoid cgroup process tracking inside Docker, and that `cgroup.conf` is in place:
+**Resolution:** ensure `slurm.conf` contains the two lines that avoid cgroup process tracking inside Docker, and that `cgroup.conf` is in place:
 
 ```bash
 ProctrackType=proctrack/linuxproc
@@ -926,16 +865,16 @@ Then restart the cluster (see "Container fails to start" above).
 
 ### Problem: `error: Parse error in file /etc/slurm-llnl/slurm.conf` or `unrecognized key: State`
 
-**Fix:** SLURM config files do **not** support line continuation. A directive split across two lines makes the second line's tokens parse as unknown directives (e.g. `State=UP` on its own line → `unrecognized key: State`). Put each directive on a single line. Also make sure `ClusterName=` is set — without it `slurmctld` refuses to start with `fatal: ClusterName needs to be specified`.
+**Resolution:** SLURM config files do **not** support line continuation. A directive split across two lines makes the second line's tokens parse as unknown directives (e.g. `State=UP` on its own line → `unrecognized key: State`). Each directive must sit on a single line, and `ClusterName=` must be set — without it `slurmctld` refuses to start with `fatal: ClusterName needs to be specified`.
 
 ---
 
-## 13. Stopping and Cleaning Up
+## 14. Stopping and Cleaning Up
 
 ### Stop the Cluster
 
 ```bash
-# From your laptop (not inside containers)
+# From the host (not inside containers)
 cd ~/slurm-cluster
 docker compose down
 ```
@@ -950,12 +889,12 @@ docker image prune -a     # Remove all unused Docker images
 
 ---
 
-## 14. Summary of What Was Created
+## 15. Repository Layout
 
 ```
 ~/slurm-cluster/
-├── Dockerfile                  # Recipe to build the pure-Arch container image
-├── docker-compose.yml          # Defines 3-node cluster architecture (privileged)
+├── Dockerfile                  # Builds the pure-Arch container image
+├── docker-compose.yml          # Defines the 3-node cluster architecture (privileged)
 ├── config/
 │   ├── slurm.conf              # SLURM configuration (shared on all nodes)
 │   ├── cgroup.conf             # Tells the cgroup plugin to skip systemd
@@ -967,15 +906,15 @@ docker image prune -a     # Remove all unused Docker images
     └── job_scripts/            # Job scripts + outputs, visible on all nodes
 ```
 
-All of these files are also checked into this repository under **`docker-cluster/`** so you can run the cluster straight from the repo instead of typing them by hand.
+These files are also checked into this repository under **`docker-cluster/`**, so the cluster can be run directly from the repo.
 
 ---
 
-*Planning to move up to real hardware? See **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)** for the 1-controller + 4-workers guide on Ubuntu 22.04 over a shared Ethernet LAN.*
+*Related: see **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)** for the real-hardware deployment (1 controller + 4 workers, Ubuntu 22.04, shared Ethernet LAN).*
 
 ---
 
-## 15. Docker Official Resources
+## 16. Docker Official Resources
 
 | Topic | Link |
 |-------|------|

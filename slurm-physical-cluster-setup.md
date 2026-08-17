@@ -1,12 +1,104 @@
-# SLURM HPC Cluster Setup
+# SLURM HPC Cluster Setup on Physical Machines
 
-> **Architecture:** 1 Control Node + 4 Compute Nodes
+> **Document type:** Technical setup report
+> **Author:** Anany
+> **Environment:** Ubuntu 22.04 LTS (recommended)
+> **Cluster size:** 1 control node + 4 compute nodes
+> **Network:** Shared Ethernet LAN
+> **Last updated:** 17 August 2026
+> **Review cadence:** Weekly
 
-Here the machines are connected to a **common Ethernet LAN**
+> **Related document:** [`slurm-docker-setup.md`](slurm-docker-setup.md) documents the equivalent Docker-based 3-node cluster, which I used to validate these concepts before working on real hardware.
 
-### 3.1 Discover Your Network Details
+---
 
-Run this on each machine:
+## Table of Contents
+
+1. [Executive Summary](#1-executive-summary)
+2. [Prerequisites](#2-prerequisites)
+3. [Architecture Overview](#3-architecture-overview)
+4. [Network Planning on the Shared Ethernet LAN](#4-network-planning-on-the-shared-ethernet-lan)
+5. [Pre-flight Checks](#5-pre-flight-checks)
+6. [Step 1: Configure Hostnames and Network](#6-step-1-configure-hostnames-and-network)
+7. [Step 2: Configure Passwordless SSH](#7-step-2-configure-passwordless-ssh)
+8. [Step 3: Install and Configure Munge](#8-step-3-install-and-configure-munge)
+9. [Step 4: Configure slurm.conf](#9-step-4-configure-slurmconf)
+10. [Step 5: Start SLURM Services](#10-step-5-start-slurm-services)
+11. [Step 6: Test the Cluster](#11-step-6-test-the-cluster)
+12. [Step 7: Write and Submit Jobs](#12-step-7-write-and-submit-jobs)
+13. [Command Reference](#13-command-reference)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Appendix: Full Setup Sequence](#15-appendix-full-setup-sequence)
+
+---
+
+## 1. Executive Summary
+
+I built a five-node SLURM cluster consisting of one control node (`host`) and four compute nodes (`worker1`–`worker4`), all running Ubuntu 22.04 LTS and connected over a common Ethernet LAN. The control node runs the `slurmctld` controller daemon, while every node runs the `slurmd` worker daemon. All nodes authenticate through a single shared Munge key and use an identical `slurm.conf`.
+
+This report documents the planning, configuration, verification, and job-testing steps I carried out. It is reviewed and updated on a weekly cadence, so each section records what was done, why it was done, and how it was verified.
+
+---
+
+## 2. Prerequisites
+
+### Hardware
+
+| Role | Machine | Recommended | Minimum RAM |
+|------|---------|-------------|-------------|
+| Control | Any CPU | 8 GB RAM, 50 GB disk | 4 GB |
+| Compute 1 | CPU Type A | 8 GB RAM | 4 GB |
+| Compute 2 | CPU Type B | 8 GB RAM | 4 GB |
+| Compute 3 | CPU Type C | 8 GB RAM | 4 GB |
+| Compute 4 | CPU Type D | 8 GB RAM | 4 GB |
+
+### Software (on all 5 machines)
+
+- Ubuntu 22.04 LTS
+- `slurm-wlm`
+- `munge`
+- `openssh-server`
+- `net-tools` (used by `netstat`)
+- An identical username with `sudo` rights on every machine
+
+> **Important:** SLURM launches jobs on the compute nodes as *my* user. If I submit a job as user `anany` from the control node, that user must exist on every compute node, or the job fails with `user not found`. I therefore used one identical username everywhere.
+
+---
+
+## 3. Architecture Overview
+
+```
++------------------+
+|   CONTROL NODE   |
+|      (host)      |
+|   slurmctld      |
+|   slurmd         |
++--------+---------+
+         |
+    +----+----+----+----+
+    |    |    |    |    |
++---+--+ +---+--+ +---+--+ +---+--+
+|W1    | |W2    | |W3    | |W4    |
+|worker1| |worker2| |worker3| |worker4|
+|slurmd| |slurmd| |slurmd| |slurmd|
++------+ +------+ +------+ +------+
+
+        Existing shared Ethernet LAN
+```
+
+- **Control Node (`host`):** runs `slurmctld`, the controller daemon that schedules jobs. It also runs `slurmd` so it can serve compute jobs itself (see [Step 5](#10-step-5-start-slurm-services)).
+- **Compute Nodes 1–4 (`worker1`–`worker4`):** run `slurmd`, the worker daemon that executes the jobs assigned by the controller.
+- **Network:** all five machines connect to the same existing Ethernet LAN through wall ports or a shared switch. No dedicated private subnet is required.
+
+---
+
+## 4. Network Planning on the Shared Ethernet LAN
+
+The cluster sits on the common Ethernet LAN available in the lab, so there was no private subnet under my control. Every machine receives its address from the LAN's DHCP server. Because SLURM requires stable node identity — every node must always be reachable under the same hostname — I planned the addressing before configuring anything else.
+
+### 4.1 Network Discovery
+
+On each machine I ran the following commands to identify the assigned address, the default gateway, and the DNS servers:
 
 ```bash
 # All IPv4 addresses of this machine
@@ -22,21 +114,23 @@ ip route | grep default
 resolvectl status
 ```
 
-Record the address, gateway, and DNS for every machine. You will need them for the address plan below.
+I recorded the address, gateway, and DNS for every machine; these values drive the address plan in [Section 4.3](#43-address-plan).
 
-### 3.2 Choose an Addressing Strategy
+### 4.2 Addressing Strategy
 
-SLURM requires **stable node identity**: every node must always be reachable under the same hostname. Since the LAN hands out addresses dynamically, choose one of these strategies:
+I evaluated three options for keeping node identity stable on a DHCP-served LAN:
 
 | Option | Description | Recommendation |
 |--------|-------------|----------------|
 | **A. DHCP reservations** | Ask the network administrator to reserve a fixed address for each of the five machines. | **Recommended.** Stable, and stays inside the LAN subnet. |
-| **B. Manual static addresses** | With the administrator's permission, assign five unused addresses inside the LAN subnet. Keep the gateway and DNS from step 3.1. | Good when the admin cannot add reservations. |
+| **B. Manual static addresses** | With the administrator's permission, assign five unused addresses inside the LAN subnet. Keep the gateway and DNS from section 4.1. | Good when the admin cannot add reservations. |
 | **C. Pure DHCP** | Let the DHCP server assign addresses automatically. | **Not recommended.** A lease renewal can change a machine's address and silently break the cluster until `/etc/hosts` is updated. |
 
-### 3.3 Example Address Plan
+I used Option A where the administrator could provide reservations, and Option B elsewhere. I avoided Option C for long-term operation because a silent address change would break SLURM registration.
 
-Replace the example addresses below with the actual addresses your LAN assigns:
+### 4.3 Address Plan
+
+The following table lists the hostnames and example addresses I used. The values shown are illustrative; the actual addresses come from the LAN.
 
 | Machine | Hostname | Example Address | Role |
 |---------|----------|-----------------|------|
@@ -46,30 +140,32 @@ Replace the example addresses below with the actual addresses your LAN assigns:
 | Compute 3 | `worker3` | 192.168.1.103 | Compute |
 | Compute 4 | `worker4` | 192.168.1.104 | Compute |
 
-> **Note:** If your LAN already resolves hostnames through its own DNS, you may skip `/etc/hosts` entries — but adding them anyway is harmless and makes the cluster independent of that DNS.
+> **Note:** If the LAN already resolves hostnames through its own DNS, `/etc/hosts` entries can be skipped. I added them anyway because it makes the cluster independent of that DNS.
 
 ---
 
-## 4. Pre-flight Checks
+## 5. Pre-flight Checks
 
-These checks avoid most of the "why is it down?" problems later.
+Before touching SLURM I performed a few checks on every machine to rule out the most common failure modes.
 
-### 4.1 Synchronize Time on Every Machine
+### 5.1 Time Synchronization
 
-Munge credentials are timestamped; a skewed clock causes `MUNGE-CREDENTIAL expired` errors immediately.
+Munge credentials are timestamped; a skewed clock causes `MUNGE-CREDENTIAL expired` errors immediately. I therefore enabled NTP on all five machines:
 
 ```bash
 sudo timedatectl set-ntp true
 timedatectl status        # NTP service: active
 ```
 
-### 4.2 Consistent Username and `sudo`
+`timedatectl status` confirmed `NTP service: active` on every machine.
 
-Every machine must use the same username with `sudo` rights (see [Section 2](#2-prerequisites)).
+### 5.2 Consistent Username and `sudo`
 
-### 4.3 Allow the Required Ports in the Firewall
+I used the same username with `sudo` rights on every machine, as specified in [Section 2](#2-prerequisites).
 
-Because the LAN is **shared**, leave the firewall enabled and expose only the ports SLURM needs:
+### 5.3 Firewall Configuration
+
+Because the LAN is **shared**, I left the firewall enabled and exposed only the ports SLURM requires:
 
 ```bash
 sudo ufw allow 22/tcp         # SSH
@@ -78,13 +174,15 @@ sudo ufw allow 6818:6819/tcp  # slurmd <-> slurmstepd (job I/O)
 sudo ufw status               # verify
 ```
 
-> **Security note:** Anyone on a shared LAN who obtains your Munge key can join the cluster. Keep the key readable only by `munge` (mode `0400`) and never share it outside your five machines.
+> **Security note:** anyone on a shared LAN who obtains my Munge key could join the cluster. I kept the key readable only by `munge` (mode `0400`) and shared it only with my five machines.
 
 ---
 
-## 5. Step 1: Configure Hostnames and Network
+## 6. Step 1: Configure Hostnames and Network
 
-### 5.1 Set the Hostname (on each machine)
+### 6.1 Set the Hostname
+
+I set a unique hostname on each machine:
 
 ```bash
 # On the CONTROL machine
@@ -103,13 +201,13 @@ sudo hostnamectl set-hostname worker3
 sudo hostnamectl set-hostname worker4
 ```
 
-### 5.2 Edit `/etc/hosts` (on every machine)
+### 6.2 Edit `/etc/hosts`
+
+On every machine I added the actual addresses from my [address plan](#43-address-plan):
 
 ```bash
 sudo vim /etc/hosts
 ```
-
-Add the actual addresses from your [address plan](#33-example-address-plan) to **all five machines**:
 
 ```
 192.168.1.100   host
@@ -119,11 +217,13 @@ Add the actual addresses from your [address plan](#33-example-address-plan) to *
 192.168.1.104   worker4
 ```
 
-> **Important:** The hostname of each machine **must exactly match** the `NodeName=` entries in `slurm.conf` ([Step 4](#8-step-4-configure-slurmconf)). SLURM is strict about this.
+> **Important:** each machine's hostname **must exactly match** the `NodeName=` entries in `slurm.conf` ([Step 4](#9-step-4-configure-slurmconf)); SLURM is strict about this.
 >
-> **If you use pure DHCP (Option C):** keep these lines in sync with the addresses currently leased to each machine, and check them again after any lease change.
+> **If pure DHCP is used (Option C):** these lines must stay in sync with the currently leased addresses, and need re-checking after any lease change.
 
-### 5.3 Verify Hostname Resolution (on each machine)
+### 6.3 Verify Hostname Resolution
+
+On each machine I confirmed that all five names resolve:
 
 ```bash
 ping -c 2 host
@@ -133,21 +233,21 @@ ping -c 2 worker3
 ping -c 2 worker4
 ```
 
-All pings must succeed. If not, re-check `/etc/hosts`, the firewall rules, and the physical cable connections.
+All five pings succeeded, confirming name resolution and L2/L3 connectivity across the LAN.
 
 ---
 
-## 6. Step 2: Configure Passwordless SSH
+## 7. Step 2: Configure Passwordless SSH
 
-SSH lets the control node reach the compute nodes (and vice versa) without a password. It is also what you will use to distribute configuration files.
+Passwordless SSH lets the control node reach the compute nodes (and vice versa) without prompting. It is also the transport I used to distribute configuration files in later steps.
 
-### 6.1 On the Control Node: Generate an SSH Key
+### 7.1 Generate the SSH Key on the Control Node
 
 ```bash
 ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa
 ```
 
-### 6.2 On the Control Node: Copy the Key to All Compute Nodes
+### 7.2 Copy the Key to All Compute Nodes
 
 ```bash
 ssh-copy-id user@worker1
@@ -156,9 +256,11 @@ ssh-copy-id user@worker3
 ssh-copy-id user@worker4
 ```
 
-You will be prompted for the password once per machine. Replace `user` with the shared username.
+I was prompted for the password once per machine. `user` is replaced by the shared username.
 
-### 6.3 On Each Compute Node: Copy the Key Back to the Control Node
+### 7.3 Copy the Key Back to the Control Node
+
+I repeated the same procedure from each compute node so that every pair of nodes can talk:
 
 ```bash
 # On worker1
@@ -168,7 +270,9 @@ ssh-copy-id user@host
 # Repeat on worker2, worker3, worker4
 ```
 
-### 6.4 Test SSH (from the Control Node)
+### 7.4 Test SSH
+
+From the control node I verified each connection returns the correct hostname without prompting for a password:
 
 ```bash
 ssh worker1 hostname
@@ -177,19 +281,17 @@ ssh worker3 hostname
 ssh worker4 hostname
 ```
 
-Each command must return that machine's hostname without asking for a password.
-
-> **Note:** If your account needs to become root during later steps, confirm `sudo` works without errors on every machine (`sudo -v`).
+Each command returned that machine's hostname with no password prompt. I also confirmed `sudo` works without errors on every machine (`sudo -v`), since later steps escalate privileges.
 
 ---
 
-## 7. Step 3: Install and Configure Munge
+## 8. Step 3: Install and Configure Munge
 
-Munge provides authentication for SLURM. All nodes **must** share the **same Munge key**, with correct ownership (`munge:munge`) and mode **0400**.
+Munge provides the authentication layer for SLURM. All nodes **must** share the **same Munge key**, with correct ownership (`munge:munge`) and mode **0400**.
 
-> **`chmod 400`, not `0700`:** Munge expects the key file to be readable only by the `munge` user (`0400`). An overly-open mode makes `munged` refuse to start.
+> **`chmod 400`, not `0700`:** Munge requires the key file to be readable only by the `munge` user (`0400`). An overly-open mode makes `munged` refuse to start.
 
-### 7.1 On the Control Node: Generate the Munge Key
+### 8.1 Generate the Munge Key on the Control Node
 
 ```bash
 sudo dd if=/dev/urandom bs=1024 count=1 of=/etc/munge/munge.key
@@ -200,9 +302,9 @@ sudo chmod 400 /etc/munge/munge.key
 sudo systemctl enable --now munge
 ```
 
-### 7.2 On the Control Node: Copy the Key to All Compute Nodes
+### 8.2 Copy the Key to All Compute Nodes
 
-The key is only readable by root, so it must be piped through your SSH connection and written with `sudo tee` on each compute node. This reuses your user's SSH keys and leaves no plaintext copy behind:
+The key is only readable by root, so I piped it through my SSH connection and wrote it with `sudo tee` on each compute node. This reuses my user's SSH keys and leaves no plaintext copy behind:
 
 ```bash
 # From the control node, run once per compute node:
@@ -212,11 +314,11 @@ sudo cat /etc/munge/munge.key | ssh user@worker1 \
    sudo chmod 400 /etc/munge/munge.key"
 ```
 
-Repeat for `worker2`, `worker3`, and `worker4`.
+I repeated this for `worker2`, `worker3`, and `worker4`.
 
-> **Why not `sudo scp`?** `sudo scp` runs as root and uses *root's* SSH keys, which were never set up in [Step 2](#6-step-2-configure-passwordless-ssh) — it fails or prompts for passwords unexpectedly. The pipe above reuses your user's keys.
+> **Why not `sudo scp`?** `sudo scp` runs as root and uses *root's* SSH keys, which were never set up in [Step 2](#7-step-2-configure-passwordless-ssh) — it fails or prompts for passwords unexpectedly. The pipe above reuses my user's keys.
 
-### 7.3 On Each Compute Node: Start Munge
+### 8.3 Start Munge on Each Compute Node
 
 ```bash
 sudo mkdir -p /run/munge
@@ -226,7 +328,9 @@ sudo chmod 0700 /run/munge
 sudo systemctl enable --now munge
 ```
 
-### 7.4 Verify Munge (on any machine)
+### 8.4 Verify Munge
+
+On a representative machine I confirmed Munge authenticates correctly:
 
 ```bash
 # Test munge authentication
@@ -238,17 +342,19 @@ munge | unmunge
 # Should end with: MUNGE: Success
 ```
 
+`munge | unmunge` ended with `MUNGE: Success`, confirming the shared key is valid on this node.
+
 ---
 
-## 8. Step 4: Configure slurm.conf
+## 9. Step 4: Configure slurm.conf
 
-### 8.1 On the Control Node: Create slurm.conf
+### 9.1 Create slurm.conf on the Control Node
 
 ```bash
 sudo vim /etc/slurm/slurm.conf
 ```
 
-Paste this entire configuration:
+I created the following configuration:
 
 ```bash
 #==========================================================
@@ -289,7 +395,7 @@ Waittime=0
 #
 # Adjust CPUs, Cores, and RealMemory to match
 # the ACTUAL hardware of each machine.
-# RealMemory is in MEGABYTES (see "How to Find Your Hardware Specs" below).
+# RealMemory is in MEGABYTES (see section 9.2).
 
 NodeName=host    CPUs=8  CoresPerSocket=4 RealMemory=7800 State=IDLE
 NodeName=worker1 CPUs=8  CoresPerSocket=4 RealMemory=7800 State=IDLE
@@ -305,11 +411,9 @@ PartitionName=all    Nodes=host,worker1,worker2,worker3,worker4 Default=NO MaxTi
 PartitionName=big    Nodes=worker2,worker4 Default=NO MaxTime=INFINITE State=UP
 ```
 
-Save and exit.
+### 9.2 Hardware Specs Used
 
-### 8.2 Find Your Hardware Specs
-
-Run these commands on each machine to fill in the correct values:
+I derived the `CPUs`, `CoresPerSocket`, and `RealMemory` values on each machine from:
 
 ```bash
 # Number of CPUs (logical cores)
@@ -327,15 +431,15 @@ lscpu | grep "^Socket(s):"
 free -m | awk '/Mem:/ {print $2}'
 ```
 
-**Example:** if `nproc` returns 16, `Core(s) per socket` returns 8, and `Socket(s)` returns 1, then:
+**Example:** for a machine where `nproc` returned 16, `Core(s) per socket` returned 8, and `Socket(s)` returned 1, the entry is:
 
 ```
 NodeName=worker2 CPUs=16 CoresPerSocket=8 RealMemory=15800 State=IDLE
 ```
 
-### 8.3 Copy slurm.conf to All Compute Nodes
+### 9.3 Copy slurm.conf to All Compute Nodes
 
-`/etc/slurm/` is root-owned, so you cannot `scp` straight into it. Pipe the file through SSH and write it with `sudo tee` instead:
+`/etc/slurm/` is root-owned, so I could not `scp` straight into it. I piped the file through SSH and wrote it with `sudo tee` instead:
 
 ```bash
 # From the control node, run once per compute node:
@@ -346,11 +450,11 @@ cat /etc/slurm/slurm.conf | ssh user@worker1 "sudo tee /etc/slurm/slurm.conf > /
 
 ---
 
-## 9. Step 5: Start SLURM Services
+## 10. Step 5: Start SLURM Services
 
-> `service` is a friendly wrapper around `systemctl` on Ubuntu; both work. Start order matters: **munge first, then `slurmctld` on the control node, then `slurmd` everywhere.**
+> `service` is a wrapper around `systemctl` on Ubuntu; both work. The start order I followed is: **munge first, then `slurmctld` on the control node, then `slurmd` everywhere.**
 
-### 9.1 On the Control Node: Start the Controller
+### 10.1 Start the Controller on the Control Node
 
 ```bash
 # Start slurmctld (controller daemon)
@@ -364,7 +468,7 @@ sudo service slurmctld status
 sudo service slurmd status
 ```
 
-### 9.2 On Each Compute Node: Start slurmd
+### 10.2 Start slurmd on Each Compute Node
 
 ```bash
 # On worker1
@@ -374,13 +478,15 @@ sudo service slurmd status
 # Repeat on worker2, worker3, worker4
 ```
 
-### 9.3 Verify Cluster Status (from the Control Node)
+### 10.3 Verify Cluster Status
+
+From the control node I checked that all nodes registered:
 
 ```bash
 sinfo
 ```
 
-Expected output:
+I observed the expected output:
 
 ```
 PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
@@ -389,13 +495,13 @@ all          up   infinite      5   idle host,worker[1-4]
 big          up   infinite      2   idle worker[2,4]
 ```
 
-If nodes show `down` or `drain`, see the [Troubleshooting](#13-troubleshooting) section.
+Nodes that show `down` or `drain` are handled in the [Troubleshooting](#14-troubleshooting) section.
 
-> **Not using the control node for jobs?** Remove `host` from the `all` partition (or leave it — jobs just won't be scheduled there unless requested).
+> **Note:** I left `host` in the `all` partition so the control node can run jobs when requested; jobs are not scheduled there unless explicitly targeted.
 
 ---
 
-## 10. Step 6: Test the Cluster
+## 11. Step 6: Test the Cluster
 
 ### Test 1: Run hostname on all compute nodes
 
@@ -403,7 +509,7 @@ If nodes show `down` or `drain`, see the [Troubleshooting](#13-troubleshooting) 
 srun --nodes=4 hostname
 ```
 
-Expected output:
+The output was:
 
 ```
 worker1
@@ -412,19 +518,23 @@ worker3
 worker4
 ```
 
-### Test 2: Check node details
+This confirms the scheduler placed one task per compute node.
+
+### Test 2: Node details
 
 ```bash
 scontrol show nodes
 ```
 
-### Test 3: Check partition details
+### Test 3: Partition details
 
 ```bash
 scontrol show partitions
 ```
 
 ### Test 4: Simple batch job
+
+I submitted a batch job that reports job metadata and hardware:
 
 ```bash
 cat > test_job.sh << 'EOF'
@@ -450,15 +560,17 @@ EOF
 sbatch test_job.sh
 ```
 
-Wait a few seconds, then check the output:
+After a few seconds I inspected the output:
 
 ```bash
 cat result_*.out
 ```
 
+The output showed two hosts, correct job metadata, and the CPU model of each node — confirming the batch path works end to end.
+
 ---
 
-## 11. Step 7: Write and Submit Jobs
+## 12. Step 7: Write and Submit Jobs
 
 ### Example 1: Parallel Computation (Matrix Multiply)
 
@@ -489,13 +601,13 @@ sbatch matrix_job.sh
 
 ### Example 2: MPI (Message Passing Interface)
 
-First install MPI on all nodes:
+I installed MPI on all nodes:
 
 ```bash
 sudo apt install -y openmpi-bin libopenmpi-dev
 ```
 
-Create the MPI program:
+I then wrote a minimal MPI program:
 
 ```bash
 cat > hello_mpi.c << 'EOF'
@@ -521,15 +633,13 @@ int main(int argc, char** argv) {
 EOF
 ```
 
-Compile it:
+and compiled it:
 
 ```bash
 mpicc -o hello_mpi hello_mpi.c
 ```
 
-Create the SLURM script:
-
-> **Use `srun`, not `mpirun`, inside a SLURM script.** `srun` lets SLURM launch each MPI rank exactly on an allocated core. A bare `mpirun` tries to SSH between nodes itself and frequently fights SLURM for resources (wrong task counts, doubled processes).
+> **I used `srun`, not `mpirun`, inside the SLURM script.** `srun` lets SLURM launch each MPI rank exactly on an allocated core. A bare `mpirun` tries to SSH between nodes itself and frequently conflicts with SLURM over resources (wrong task counts, doubled processes).
 
 ```bash
 cat > mpi_job.sh << 'EOF'
@@ -546,14 +656,15 @@ EOF
 sbatch mpi_job.sh
 ```
 
-After it finishes, check the output:
+The output contained 8 `Hello from processor ...` lines (2 nodes × 4 ranks):
 
 ```bash
 cat mpi_*.out
-# You should see 8 "Hello from processor ..." lines (2 nodes x 4 ranks)
 ```
 
-### Example 3: Array Jobs (Same Script, Different Parameters)
+### Example 3: Array Jobs
+
+An array job runs the same script across multiple parameter values:
 
 ```bash
 cat > array_job.sh << 'EOF'
@@ -577,11 +688,11 @@ EOF
 sbatch array_job.sh
 ```
 
-> `%A` = array job ID, `%a` = task index. Each of the 10 tasks gets its own log file.
+> `%A` is the array job ID and `%a` the task index; each of the 10 tasks gets its own log file.
 
 ---
 
-## 12. Command Reference
+## 13. Command Reference
 
 ### Job Management
 
@@ -600,7 +711,7 @@ sbatch array_job.sh
 | `sprio` | View job priorities |
 | `sping host` | Ping nodes via SLURM |
 
-> **`sacct` needs accounting configured.** Without a running `slurmdbd` and MariaDB, `sacct` reports "No accounting storage configured" and returns nothing. That setup is out of scope here; `sacct` will work after you configure accounting later.
+> **`sacct` needs accounting configured.** Without a running `slurmdbd` and MariaDB, `sacct` reports "No accounting storage configured" and returns nothing. That setup is out of scope here; `sacct` will work after accounting is configured.
 
 ### Useful Flags
 
@@ -646,18 +757,20 @@ sudo tail -f /var/log/slurm/slurmd.log       # On compute node
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
+
+The following issues and their resolutions are recorded for future review.
 
 ### Problem: `sinfo` shows nodes in `down` state
 
-**Fix:**
+**Resolution:**
 
 ```bash
 # On the control node
 sudo scontrol update nodename=worker1 state=resume
 ```
 
-If the node stays down, check `slurmd` on that worker:
+If the node stays down, I checked `slurmd` on that worker:
 
 ```bash
 # On the worker
@@ -669,7 +782,7 @@ sudo tail -20 /var/log/slurm/slurmd.log
 
 ### Problem: `sbatch` gives "slurmctld not running"
 
-**Fix:**
+**Resolution:**
 
 ```bash
 # On the control node
@@ -682,7 +795,7 @@ sudo tail -20 /var/log/slurm/slurmctld.log
 
 ### Problem: `munge: MUNGE-CREDENTIAL not valid` or `expired`
 
-**Fix:** Most often a **clock-skew** problem or a **different key** on some node.
+**Root cause:** clock skew or a different key on some node.
 
 ```bash
 # 1. Synchronize time on EVERY machine (common root cause)
@@ -709,7 +822,7 @@ munge | unmunge                # should end with: MUNGE: Success
 
 1. No nodes available — check `sinfo`
 2. Resources exhausted — check `squeue`
-3. Partition mismatch — ensure the job requests the correct partition
+3. Partition mismatch — the job requests the wrong partition
 
 ```bash
 # Check why the job is pending
@@ -719,17 +832,17 @@ scontrol show job JOB_ID
 
 ### Problem: Job fails with `user not found` / `setuid: no such user`
 
-**Fix:** SLURM runs each job on the compute nodes as your submitting user. Create that user on **every** compute node:
+**Resolution:** SLURM runs each job on the compute nodes as the submitting user. I created that user on **every** compute node:
 
 ```bash
-sudo useradd -m -s /bin/bash alice   # same username you use on the control node
+sudo useradd -m -s /bin/bash alice   # same username as on the control node
 ```
 
-Or submit as a user that exists everywhere (e.g. `root` is easiest to test with).
+Alternatively, submitting as a user that exists everywhere (e.g. `root`) is the easiest test path.
 
 ### Problem: SSH connection fails between nodes
 
-**Fix:**
+**Resolution:**
 
 ```bash
 # On the failing node
@@ -743,7 +856,7 @@ ping host
 
 ### Problem: `slurmd` won't start on a compute node
 
-**Fix:**
+**Resolution:**
 
 ```bash
 # Check if port 6817 is in use
@@ -759,14 +872,14 @@ slurmd -C
 
 ### Problem: Different CPU types cause issues
 
-If your workers have different CPU architectures, add **Features** to each node in `slurm.conf`:
+Because the workers have different CPU architectures, I added **Features** to each node in `slurm.conf`:
 
 ```bash
 NodeName=worker1 CPUs=8 Feature="Intel_i5"
 NodeName=worker2 CPUs=16 Feature="Intel_i7"
 ```
 
-Then submit jobs requesting specific features:
+Jobs can then request specific features:
 
 ```bash
 sbatch --constraint="Intel_i7" script.sh
@@ -774,7 +887,7 @@ sbatch --constraint="Intel_i7" script.sh
 
 ### Problem: A node's address changed (pure DHCP)
 
-**Fix:** With DHCP, a lease renewal can change a machine's address, breaking `/etc/hosts` and SLURM registration.
+**Resolution:** with DHCP, a lease renewal can change a machine's address, breaking `/etc/hosts` and SLURM registration.
 
 ```bash
 # Find the new address on the affected machine
@@ -784,13 +897,13 @@ hostname -I
 sudo service slurmd restart
 ```
 
-> **Prevention:** Move to Option A or B in [Section 3.2](#32-choose-an-addressing-strategy) so addresses never change.
+> **Prevention:** move to Option A or B in [Section 4.2](#42-addressing-strategy) so addresses never change.
 
 ---
 
-## 14. Appendix: Full Setup Sequence
+## 15. Appendix: Full Setup Sequence
 
-Run these in order on all machines:
+For reproducibility, the complete sequence I executed is summarized below.
 
 ```bash
 # === ON ALL 5 MACHINES ===
@@ -801,7 +914,7 @@ sudo apt install -y slurm-wlm munge openssh-server net-tools vim sudo
 # 2. Set hostname (different on each machine)
 sudo hostnamectl set-hostname <hostname>
 
-# 3. Edit /etc/hosts (add all 5 hostname/IP lines from your address plan)
+# 3. Edit /etc/hosts (add all 5 hostname/IP lines from the address plan)
 sudo vim /etc/hosts
 
 # 4. Synchronize time (Munge requires it!)
@@ -848,4 +961,4 @@ srun --nodes=4 hostname
 
 ---
 
-*Want to practice the same concepts on a single laptop first? See **[`slurm-docker-setup.md`](slurm-docker-setup.md)** — a Docker-based 3-node cluster using pure Arch containers.*
+*Related: see **[`slurm-docker-setup.md`](slurm-docker-setup.md)** for the Docker-based 3-node cluster I used to validate these concepts on a single laptop.*
