@@ -4,7 +4,7 @@
 [![SLURM](https://img.shields.io/badge/SLURM-26.x-blue.svg)](https://slurm.schedmd.com)
 [![Platform](https://img.shields.io/badge/platform-Linux-important.svg)](https://www.linux.org)
 
-Beginner-friendly, step-by-step guides for building your own **SLURM** (Simple Linux Utility for Resource Management) cluster — from a single laptop to a full multi-machine college lab.
+Beginner-friendly, step-by-step guides for building your own **SLURM** (Simple Linux Utility for Resource Management) cluster — from a single laptop to a full multi-machine cluster over a shared Ethernet LAN.
 
 Both guides share the same concepts (SLURM, Munge, SSH) and the same commands, so you can learn in a Docker sandbox first and then apply it to real hardware.
 
@@ -13,7 +13,7 @@ Both guides share the same concepts (SLURM, Munge, SSH) and the same commands, s
 | Path | What it is |
 |------|-----------|
 | [`slurm-docker-setup.md`](slurm-docker-setup.md) | 3-node simulated cluster (1 controller + 2 workers) in Docker on your Arch Linux laptop. **Pure Arch containers, no systemd.** |
-| [`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md) | 1 controller + 4 workers on real Ubuntu 22.04 machines in a college lab. |
+| [`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md) | 1 controller + 4 workers on real Ubuntu 22.04 machines over a shared Ethernet LAN — no dedicated physical network needed. |
 | [`docker-cluster/`](docker-cluster/) | Ready-to-run files from the Docker guide (`Dockerfile`, `docker-compose.yml`, `slurm.conf`, `entrypoint.sh`). |
 
 ## Quick Start
@@ -54,16 +54,16 @@ Both guides share the same concepts (SLURM, Munge, SSH) and the same commands, s
 
 > Full walkthrough: **[`slurm-docker-setup.md`](slurm-docker-setup.md)**
 
-### Option B — Real lab cluster (Ubuntu 22.04)
+### Option B — Real cluster (Ubuntu 22.04)
 
-Follow **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)**. You'll need 5 machines (1 controller + 4 workers) on the same network.
+Follow **[`slurm-physical-cluster-setup.md`](slurm-physical-cluster-setup.md)**. You'll need 5 machines (1 controller + 4 workers) connected to the same Ethernet LAN.
 
 ## Requirements
 
 | Option | Hardware | Software |
 |--------|----------|----------|
 | Docker (laptop) | 8 GB RAM (16 GB recommended), 20 GB disk | Arch Linux, Docker + Compose |
-| Physical (lab) | 5 machines, 4 GB RAM each minimum | Ubuntu 22.04 LTS |
+| Physical | 5 machines, 4 GB RAM each minimum | Ubuntu 22.04 LTS |
 
 ## Concepts You'll Learn
 
